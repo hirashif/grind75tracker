@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import os
 import time
+import pandas as pd
 from datetime import datetime, timedelta
 
 # --- PAGE CONFIG ---
@@ -199,12 +200,9 @@ def load_data():
     final_data = []
     for p in INITIAL_PROBLEMS:
         if p['id'] in saved_dict:
-            # Ensure fields exist for legacy data
             problem = saved_dict[p['id']]
-            if 'history' not in problem:
-                problem['history'] = []
-            if 'notes' not in problem:
-                problem['notes'] = ""
+            if 'history' not in problem: problem['history'] = []
+            if 'notes' not in problem: problem['notes'] = ""
             final_data.append(problem)
         else:
             new_p = p.copy()
@@ -216,7 +214,6 @@ def load_data():
                 'notes': ""
             })
             final_data.append(new_p)
-            
     return final_data
 
 def save_data(data):
@@ -228,67 +225,48 @@ def calculate_streak(problems):
     for p in problems:
         for h in p.get('history', []):
             if 'date' in h:
-                activity_dates.add(h['date'][:10]) # YYYY-MM-DD
+                activity_dates.add(h['date'][:10])
     
-    if not activity_dates:
-        return 0
+    if not activity_dates: return 0
 
     streak = 0
     today = datetime.now().date()
-    
-    # Check if active today
     check_date = today
     
-    # If no activity today, check if streak is alive from yesterday
     if check_date.isoformat() not in activity_dates:
         if (check_date - timedelta(days=1)).isoformat() not in activity_dates:
-            return 0 # Streak broken
+            return 0
         else:
             check_date -= timedelta(days=1)
             
-    # Count backwards
     while check_date.isoformat() in activity_dates:
         streak += 1
         check_date -= timedelta(days=1)
-        
     return streak
 
 def update_problem_status(problem, quality):
-    """
-    Core Logic for Spaced Repetition
-    quality: 'Fail' (1), 'Hard' (2), 'Easy' (3)
-    """
     now = datetime.now()
     new_interval = 1
     new_status = 'Learning'
     
     if quality == 'Fail':
-        new_interval = 1 # Review tomorrow
+        new_interval = 1
         new_status = 'Learning'
     elif quality == 'Hard':
-        new_interval = 3 # Review in 3 days
+        new_interval = 3
         new_status = 'Learning'
     elif quality == 'Easy':
-        # If it was New or 0, start at 7. Otherwise double it.
         current_int = problem.get('interval', 0)
         new_interval = 7 if current_int == 0 else int(current_int * 2)
-        
-        # Cap at 60 days, and mark mastered if > 30
-        if new_interval > 30:
-            new_status = 'Mastered'
-        else:
-            new_status = 'Learning'
+        new_status = 'Mastered' if new_interval > 30 else 'Learning'
             
-    # Calculate next review date (4 AM next due day)
     next_date = (now + timedelta(days=new_interval)).replace(hour=4, minute=0, second=0, microsecond=0)
     
     problem['status'] = new_status
     problem['interval'] = new_interval
     problem['nextReview'] = next_date.isoformat()
     
-    # Log History
-    if 'history' not in problem:
-        problem['history'] = []
+    if 'history' not in problem: problem['history'] = []
     problem['history'].append({
         'date': now.isoformat(),
         'quality': quality
@@ -296,13 +274,11 @@ def update_problem_status(problem, quality):
     
     return problem
 
-def update_note_callback(problem_id):
+def update_note_callback(problem_id, widget_key):
     """Callback to save notes instantly"""
-    # Find problem in session state list
     for p in st.session_state.problems:
         if p['id'] == problem_id:
-            # Get the new text from the widget key
-            p['notes'] = st.session_state[f"note_{problem_id}"]
+            p['notes'] = st.session_state[widget_key]
             save_data(st.session_state.problems)
             break
 
@@ -314,7 +290,6 @@ if 'problems' not in st.session_state:
 problems = st.session_state.problems
 streak = calculate_streak(problems)
 
-# Calculations
 now = datetime.now()
 due_problems = []
 for p in problems:
@@ -329,46 +304,63 @@ for p in problems:
 
 # --- UI LAYOUT ---
 
-# SIDEBAR
+# SIDEBAR: Timer & Data Management
 with st.sidebar:
     st.header("⏱️ Study Timer")
-    
-    # Timer Logic
-    if 'timer_start' not in st.session_state:
-        st.session_state.timer_start = None
+    if 'timer_start' not in st.session_state: st.session_state.timer_start = None
     
     if st.session_state.timer_start is None:
         if st.button("▶️ Start Timer"):
             st.session_state.timer_start = datetime.now()
             st.rerun()
     else:
-        start_time = st.session_state.timer_start
-        elapsed = datetime.now() - start_time
-        # Format elapsed time
+        elapsed = datetime.now() - st.session_state.timer_start
         seconds = int(elapsed.total_seconds())
-        minutes = seconds // 60
-        sec = seconds % 60
-        
         st.markdown(f"""
         <div class="timer-box">
-            <h3 style="margin:0;">{minutes:02d}:{sec:02d}</h3>
+            <h3 style="margin:0;">{seconds//60:02d}:{seconds%60:02d}</h3>
             <small>Running...</small>
         </div>
         """, unsafe_allow_html=True)
-        
         if st.button("⏹️ Stop Timer"):
             st.session_state.timer_start = None
-            st.success(f"Session ended. Duration: {minutes}m {sec}s")
-            time.sleep(2) # Give user time to see message
+            st.success(f"Session ended. Duration: {seconds//60}m {seconds%60}s")
+            time.sleep(2)
             st.rerun()
     
     st.divider()
     
-    st.header("Settings")
-    if st.button("🗑️ Reset All Progress", help="This will wipe all data and start fresh."):
-        if os.path.exists(DATA_FILE):
-            os.remove(DATA_FILE)
-        st.session_state.problems = load_data() # Reload default
+    st.header("💾 Data Management")
+    st.info("⚠️ Streamlit Cloud may reset your data on update. Download a backup!")
+    
+    # DOWNLOAD BACKUP
+    json_str = json.dumps(problems, indent=2)
+    st.download_button(
+        label="📥 Download Backup (JSON)",
+        data=json_str,
+        file_name="grind75_backup.json",
+        mime="application/json"
+    )
+    
+    # RESTORE BACKUP
+    uploaded_file = st.file_uploader("📤 Restore from Backup", type=["json"])
+    if uploaded_file is not None:
+        try:
+            restored_data = json.load(uploaded_file)
+            if isinstance(restored_data, list) and len(restored_data) > 0:
+                if st.button("Confirm Restore"):
+                    save_data(restored_data)
+                    st.session_state.problems = restored_data
+                    st.success("✅ Data restored successfully! Reloading...")
+                    time.sleep(1)
+                    st.rerun()
+        except Exception as e:
+            st.error(f"Error restoring file: {e}")
+
+    st.divider()
+    if st.button("🗑️ Reset All Progress"):
+        if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
+        st.session_state.problems = load_data()
         st.rerun()
 
 st.title("Grind 75 Smart Tracker")
@@ -381,166 +373,106 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Custom Color Stats Cards
+# Stats Cards
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-value color-green">{stats['Mastered']}</div>
-            <div class="stat-label">Mastered</div>
-        </div>
-    """, unsafe_allow_html=True)
-
+    st.markdown(f'<div class="stat-card"><div class="stat-value color-green">{stats["Mastered"]}</div><div class="stat-label">Mastered</div></div>', unsafe_allow_html=True)
 with col2:
-    st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-value color-yellow">{stats['Learning']}</div>
-            <div class="stat-label">Learning</div>
-        </div>
-    """, unsafe_allow_html=True)
-
+    st.markdown(f'<div class="stat-card"><div class="stat-value color-yellow">{stats["Learning"]}</div><div class="stat-label">Learning</div></div>', unsafe_allow_html=True)
 with col3:
-    st.markdown(f"""
-        <div class="stat-card">
-            <div class="stat-value color-gray">{stats['New']}</div>
-            <div class="stat-label">New</div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div class="stat-card"><div class="stat-value color-gray">{stats["New"]}</div><div class="stat-label">New</div></div>', unsafe_allow_html=True)
 
-# Progress Bar
-total = len(problems)
-progress = stats['Mastered'] / total
-st.progress(progress)
+st.progress(stats['Mastered'] / len(problems))
 
-tab1, tab2 = st.tabs(["Daily Check-in", "All Problems"])
+# TABS
+tab1, tab2, tab3 = st.tabs(["Daily Check-in", "All Problems", "Progress & History"])
 
-# --- TAB 1: REVIEW QUEUE ---
+# --- TAB 1: DAILY CHECK-IN ---
 with tab1:
     st.header(f"Due Today ({len(due_problems)})")
     if len(due_problems) == 0:
-        st.success("🎉 You're all caught up! Great job maintaining your spaced repetition.")
-        st.info("Want to do more? Go to 'All Problems' to pick up something new.")
+        st.success("🎉 You're all caught up! Go to 'All Problems' to start something new.")
     else:
         for p in due_problems:
             with st.container():
                 st.markdown(f"### [{p['title']}]({p['link']})")
                 st.caption(f"**{p['difficulty']}** • {p['topic']} • Interval: {p['interval']} days")
-                
-                # Buttons
                 c1, c2, c3 = st.columns(3)
-                if c1.button("🔴 Fail (1d)", key=f"q_fail_{p['id']}", help="I forgot the solution"):
-                    update_problem_status(p, 'Fail')
-                    save_data(problems)
-                    st.rerun()
-                if c2.button("🟡 Hard (3d)", key=f"q_hard_{p['id']}", help="I struggled but solved it"):
-                    update_problem_status(p, 'Hard')
-                    save_data(problems)
-                    st.rerun()
-                if c3.button("🟢 Easy (Double)", key=f"q_easy_{p['id']}", help="I solved it instantly"):
-                    update_problem_status(p, 'Easy')
-                    save_data(problems)
-                    st.rerun()
+                if c1.button("🔴 Fail (1d)", key=f"q_fail_{p['id']}"):
+                    update_problem_status(p, 'Fail'); save_data(problems); st.rerun()
+                if c2.button("🟡 Hard (3d)", key=f"q_hard_{p['id']}"):
+                    update_problem_status(p, 'Hard'); save_data(problems); st.rerun()
+                if c3.button("🟢 Easy (Double)", key=f"q_easy_{p['id']}"):
+                    update_problem_status(p, 'Easy'); save_data(problems); st.rerun()
                 
-                # Notes Section for Review
                 with st.expander("📝 Notes"):
-                     st.text_area(
-                        "Your Notes", 
-                        value=p.get('notes', ""), 
-                        key=f"note_{p['id']}_review",
-                        on_change=update_note_callback,
-                        args=(p['id'],) # We need to map review key to original logic if tricky, but easier to just use different key and duplicate logic? 
-                        # Actually simpler: Update logic below for unique keys
-                     )
-                     # Streamlit key-callback interaction is simpler if we inline the logic or use the unique key. 
-                     # The callback 'update_note_callback' uses st.session_state[key], so we need the key to match.
-                     # Let's just do a manual check for this one to be safe.
-                     if f"note_{p['id']}_review" in st.session_state:
-                         if st.session_state[f"note_{p['id']}_review"] != p.get('notes', ""):
-                             p['notes'] = st.session_state[f"note_{p['id']}_review"]
-                             save_data(problems)
-
+                    rev_key = f"note_{p['id']}_rev"
+                    st.text_area("Notes", value=p.get('notes', ""), key=rev_key, on_change=update_note_callback, args=(p['id'], rev_key))
                 st.divider()
 
 # --- TAB 2: ALL PROBLEMS ---
 with tab2:
     st.header("All Problems")
-    
-    # Filter by topic
     topics = sorted(list(set(p['topic'] for p in problems)))
     c_filter, c_search = st.columns([1, 2])
-    
-    with c_filter:
-        selected_topic = st.selectbox("Filter by Topic", ["All"] + topics)
-    
-    with c_search:
-        search_query = st.text_input("Search Problems", "")
+    selected_topic = c_filter.selectbox("Filter by Topic", ["All"] + topics)
+    search_query = c_search.text_input("Search Problems", "")
     
     filtered = []
     for p in problems:
-        # 1. Topic Filter
-        if selected_topic != "All" and p['topic'] != selected_topic:
-            continue
-        
-        # 2. Search Filter
+        if selected_topic != "All" and p['topic'] != selected_topic: continue
         if search_query:
             q = search_query.lower()
-            if q not in p['title'].lower() and q not in p['topic'].lower() and q not in p['difficulty'].lower():
-                continue
-        
+            if q not in p['title'].lower() and q not in p['topic'].lower() and q not in p['difficulty'].lower(): continue
         filtered.append(p)
     
-    # Render List
-    if len(filtered) == 0:
-        st.info("No problems match your filters.")
+    if not filtered: st.info("No problems match.")
     else:
         for p in filtered:
             with st.container():
                 c1, c2 = st.columns([3, 1])
-                
                 with c1:
-                    # Title & Link
                     st.markdown(f"**[{p['title']}]({p['link']})**")
-                    status_color = "color-gray"
-                    if p['status'] == 'Mastered': status_color = "color-green"
-                    elif p['status'] == 'Learning': status_color = "color-yellow"
-                    
-                    st.markdown(f"""
-                        <span style='font-size:14px; color:#666;'>
-                            {p['difficulty']} • {p['topic']} • 
-                            <span class='{status_color}' style='font-weight:bold;'>{p['status']}</span>
-                            {f" (Due: {p['nextReview'][:10]})" if p.get('nextReview') else ""}
-                        </span>
-                    """, unsafe_allow_html=True)
-                
+                    color = "color-green" if p['status']=='Mastered' else "color-yellow" if p['status']=='Learning' else "color-gray"
+                    st.markdown(f"<span style='color:#666'>{p['difficulty']} • {p['topic']} • <span class='{color}' style='font-weight:bold'>{p['status']}</span></span>", unsafe_allow_html=True)
                 with c2:
-                    # Traffic Light Buttons
                     b1, b2, b3 = st.columns(3)
-                    if b1.button("🔴", key=f"light_fail_{p['id']}", help="Fail"):
-                        update_problem_status(p, 'Fail')
-                        save_data(problems)
-                        st.rerun()
-                    if b2.button("🟡", key=f"light_hard_{p['id']}", help="Hard"):
-                        update_problem_status(p, 'Hard')
-                        save_data(problems)
-                        st.rerun()
-                    if b3.button("🟢", key=f"light_easy_{p['id']}", help="Easy"):
-                        update_problem_status(p, 'Easy')
-                        save_data(problems)
-                        st.rerun()
+                    if b1.button("🔴", key=f"l_f_{p['id']}"): update_problem_status(p, 'Fail'); save_data(problems); st.rerun()
+                    if b2.button("🟡", key=f"l_h_{p['id']}"): update_problem_status(p, 'Hard'); save_data(problems); st.rerun()
+                    if b3.button("🟢", key=f"l_e_{p['id']}"): update_problem_status(p, 'Easy'); save_data(problems); st.rerun()
                 
-                # NOTES EXPANDER
                 with st.expander("📝 Notes"):
-                    # We use a unique key for the widget
-                    note_key = f"note_{p['id']}"
-                    
-                    # Widget
-                    st.text_area(
-                        "Write your thoughts here:", 
-                        value=p.get('notes', ""), 
-                        key=note_key,
-                        on_change=update_note_callback,
-                        args=(p['id'],) 
-                    )
-                    
+                    norm_key = f"note_{p['id']}"
+                    st.text_area("Write notes:", value=p.get('notes', ""), key=norm_key, on_change=update_note_callback, args=(p['id'], norm_key))
                 st.divider()
+
+# --- TAB 3: PROGRESS & HISTORY ---
+with tab3:
+    st.header("📚 Solved Problems & History")
+    
+    completed = [p for p in problems if p['status'] != 'New']
+    
+    if not completed:
+        st.info("No problems solved yet. Start grinding!")
+    else:
+        # Prepare Data for Table
+        table_data = []
+        for p in completed:
+            next_review = p['nextReview'][:10] if p['nextReview'] else "N/A"
+            stage_desc = f"{p['status']} ({p['interval']}d interval)"
+            table_data.append({
+                "Problem": p['title'],
+                "Topic": p['topic'],
+                "Difficulty": p['difficulty'],
+                "Stage": stage_desc,
+                "Next Review": next_review
+            })
+        
+        df = pd.DataFrame(table_data)
+        st.dataframe(
+            df, 
+            use_container_width=True,
+            column_config={
+                "Next Review": st.column_config.DateColumn("Next Review", format="YYYY-MM-DD"),
+            }
+        )
